@@ -26,7 +26,8 @@ app.post("/ask", async (req, res) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-goog-api-key": process.env.GEMINI_API_KEY
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+          "Api-Revision": "2026-05-20"
         },
         body: JSON.stringify({
           model: "gemini-3.6-flash",
@@ -41,9 +42,16 @@ app.post("/ask", async (req, res) => {
       return res.status(response.status).json(data);
     }
 
+    const answer =
+      data?.steps
+        ?.find(step => step.type === "model_output")
+        ?.content
+        ?.find(item => item.type === "text")
+        ?.text || "No response";
+
     res.json({
       success: true,
-      answer: data.output_text || data.outputs?.[0]?.text || "No response"
+      answer
     });
 
   } catch (error) {
