@@ -21,23 +21,16 @@ app.post("/ask", async (req, res) => {
     }
 
     const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-        process.env.GEMINI_API_KEY,
+      "https://generativelanguage.googleapis.com/v1beta/interactions",
       {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY
         },
         body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ]
+          model: "gemini-3.6-flash",
+          input: prompt
         })
       }
     );
@@ -48,13 +41,11 @@ app.post("/ask", async (req, res) => {
       return res.status(response.status).json(data);
     }
 
-    const answer =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
-
     res.json({
       success: true,
-      answer
+      answer: data.output_text || data.outputs?.[0]?.text || "No response"
     });
+
   } catch (error) {
     console.error(error);
 
