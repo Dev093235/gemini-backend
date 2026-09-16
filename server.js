@@ -13,8 +13,8 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     service: "Rudra AI Backend",
-    providers: ["gemini", "openai", "deepseek"],
-    fallback: "gemini -> openai -> deepseek",
+    providers: ["gemini", "openai", "groq"],
+    fallback: "gemini -> openai -> groq",
     status: "online"
   });
 });
@@ -49,6 +49,7 @@ async function askGemini(prompt) {
 
   if (!response.ok) {
     console.error("GEMINI API ERROR:", data);
+
     throw new Error(
       data?.error?.message || "Gemini API request failed"
     );
@@ -105,6 +106,7 @@ async function askOpenAI(prompt) {
 
   if (!response.ok) {
     console.error("OPENAI API ERROR:", data);
+
     throw new Error(
       data?.error?.message || "OpenAI API request failed"
     );
@@ -132,18 +134,18 @@ async function askOpenAI(prompt) {
 }
 
 // =========================
-// DEEPSEEK
+// GROQ
 // =========================
 
-async function askDeepSeek(prompt) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+async function askGroq(prompt) {
+  const apiKey = process.env.GROQ_API_KEY;
 
   if (!apiKey) {
-    throw new Error("DEEPSEEK_API_KEY missing");
+    throw new Error("GROQ_API_KEY missing");
   }
 
   const response = await fetch(
-    "https://api.deepseek.com/chat/completions",
+    "https://api.groq.com/openai/v1/chat/completions",
     {
       method: "POST",
       headers: {
@@ -151,7 +153,7 @@ async function askDeepSeek(prompt) {
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "deepseek-chat",
+        model: "openai/gpt-oss-120b",
         messages: [
           {
             role: "user",
@@ -165,9 +167,10 @@ async function askDeepSeek(prompt) {
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("DEEPSEEK API ERROR:", data);
+    console.error("GROQ API ERROR:", data);
+
     throw new Error(
-      data?.error?.message || "DeepSeek API request failed"
+      data?.error?.message || "Groq API request failed"
     );
   }
 
@@ -177,11 +180,11 @@ async function askDeepSeek(prompt) {
 
   if (!answer) {
     console.error(
-      "DEEPSEEK RAW RESPONSE:",
+      "GROQ RAW RESPONSE:",
       JSON.stringify(data)
     );
 
-    throw new Error("DeepSeek returned empty response");
+    throw new Error("Groq returned empty response");
   }
 
   return answer;
@@ -238,22 +241,23 @@ app.post("/ask", async (req, res) => {
     }
 
     // =====================
-    // MANUAL DEEPSEEK
+    // MANUAL GROQ
     // =====================
 
-    if (provider === "deepseek") {
-      const answer = await askDeepSeek(prompt);
+    if (provider === "groq") {
+      const answer = await askGroq(prompt);
 
       return res.json({
         success: true,
         answer,
-        provider: "deepseek"
+        provider: "groq"
       });
     }
 
     // =====================
     // AUTO FALLBACK
-    // Gemini -> OpenAI -> DeepSeek
+    //
+    // Gemini -> OpenAI -> Groq
     // =====================
 
     try {
@@ -289,19 +293,19 @@ app.post("/ask", async (req, res) => {
         );
 
         try {
-          const answer = await askDeepSeek(prompt);
+          const answer = await askGroq(prompt);
 
           return res.json({
             success: true,
             answer,
-            provider: "deepseek"
+            provider: "groq"
           });
 
-        } catch (deepseekError) {
+        } catch (groqError) {
 
           console.error(
-            "DeepSeek failed:",
-            deepseekError.message
+            "Groq failed:",
+            groqError.message
           );
 
           return res.status(500).json({
@@ -310,7 +314,7 @@ app.post("/ask", async (req, res) => {
             details: {
               gemini: geminiError.message,
               openai: openaiError.message,
-              deepseek: deepseekError.message
+              groq: groqError.message
             }
           });
         }
