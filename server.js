@@ -11,7 +11,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "online",
     message: "Rudra AI Backend Running",
-    providers: ["gemini", "grok"]
+    providers: ["gemini", "openai"]
   });
 });
 
@@ -56,6 +56,8 @@ async function askGemini(prompt) {
     );
 
     error.status = response.status;
+    error.provider = "gemini";
+
     throw error;
   }
 
@@ -75,25 +77,25 @@ async function askGemini(prompt) {
 
 
 // =========================
-// GROK
+// OPENAI
 // =========================
-async function askGrok(prompt) {
-  if (!process.env.XAI_API_KEY) {
-    throw new Error("XAI_API_KEY is not configured");
+async function askOpenAI(prompt) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not configured");
   }
 
   const response = await fetch(
-    "https://api.x.ai/v1/responses",
+    "https://api.openai.com/v1/responses",
     {
       method: "POST",
 
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.XAI_API_KEY}`
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
       },
 
       body: JSON.stringify({
-        model: "grok-4.6",
+        model: "gpt-5.6-luna",
         input: prompt
       }),
 
@@ -103,36 +105,32 @@ async function askGrok(prompt) {
 
   const data = await response.json();
 
-  // IMPORTANT:
-  // Actual xAI error Render logs mein dikhega
   if (!response.ok) {
     console.error(
-      "GROK API ERROR:",
+      "OPENAI API ERROR:",
       JSON.stringify(data, null, 2)
     );
 
     const error = new Error(
       data?.error?.message ||
-      data?.message ||
-      `Grok HTTP ${response.status}`
+      `OpenAI HTTP ${response.status}`
     );
 
     error.status = response.status;
-    error.provider = "grok";
+    error.provider = "openai";
 
     throw error;
   }
 
-  // xAI Responses API ka normal output
   const answer = data?.output_text || "";
 
   if (!answer) {
     console.error(
-      "GROK EMPTY RESPONSE:",
+      "OPENAI EMPTY RESPONSE:",
       JSON.stringify(data, null, 2)
     );
 
-    throw new Error("Grok returned empty response");
+    throw new Error("OpenAI returned empty response");
   }
 
   return answer;
@@ -159,29 +157,29 @@ app.post("/ask", async (req, res) => {
 
 
   // ==========================================
-  // MANUAL GROK
+  // MANUAL OPENAI
   // ==========================================
-  if (provider === "grok") {
+  if (provider === "openai" || provider === "chatgpt") {
     try {
-      const answer = await askGrok(prompt);
+      const answer = await askOpenAI(prompt);
 
       return res.json({
         success: true,
         answer,
-        provider: "grok"
+        provider: "openai"
       });
 
     } catch (error) {
 
       console.error(
-        "Grok request failed:",
+        "OpenAI request failed:",
         error
       );
 
       return res.status(error.status || 502).json({
         success: false,
         error: error.message,
-        provider: "grok"
+        provider: "openai"
       });
     }
   }
@@ -223,7 +221,7 @@ app.post("/ask", async (req, res) => {
   // ↓
   // Gemini fails
   // ↓
-  // Grok fallback
+  // OpenAI fallback
   // ==========================================
   try {
 
@@ -243,43 +241,43 @@ app.post("/ask", async (req, res) => {
     );
 
     console.log(
-      "Gemini failed. Trying Grok fallback..."
+      "Gemini failed. Trying OpenAI fallback..."
     );
 
 
     // ==========================================
-    // GROK FALLBACK
+    // OPENAI FALLBACK
     // ==========================================
     try {
 
-      const answer = await askGrok(prompt);
+      const answer = await askOpenAI(prompt);
 
       return res.json({
         success: true,
         answer,
-        provider: "grok",
+        provider: "openai",
         fallback: true
       });
 
-    } catch (grokError) {
+    } catch (openaiError) {
 
       console.error(
-        "Grok fallback failed:",
-        grokError.message
+        "OpenAI fallback failed:",
+        openaiError.message
       );
 
       return res.status(502).json({
         success: false,
-        error: "Both Gemini and Grok failed",
+        error: "Both Gemini and OpenAI failed",
 
         gemini: {
           error: geminiError.message,
           status: geminiError.status || null
         },
 
-        grok: {
-          error: grokError.message,
-          status: grokError.status || null
+        openai: {
+          error: openaiError.message,
+          status: openaiError.status || null
         }
       });
     }
