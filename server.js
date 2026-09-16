@@ -48,22 +48,28 @@ async function askGemini(prompt) {
 
   if (!response.ok) {
     console.error("GEMINI API ERROR:", data);
+
     throw new Error(
       data?.error?.message || "Gemini API request failed"
     );
   }
 
+  // Current Gemini Interactions API response
   const answer =
-    data?.output_text ||
-    data?.output
+    data?.steps
+      ?.filter(step => step.type === "model_output")
+      ?.flatMap(step => step.content || [])
       ?.filter(item => item.type === "text")
       ?.map(item => item.text)
       ?.join("\n")
-      ?.trim() ||
-    "";
+      ?.trim() || "";
 
   if (!answer) {
-    console.error("GEMINI RAW RESPONSE:", JSON.stringify(data));
+    console.error(
+      "GEMINI RAW RESPONSE:",
+      JSON.stringify(data)
+    );
+
     throw new Error("Gemini returned empty response");
   }
 
@@ -100,12 +106,12 @@ async function askOpenAI(prompt) {
 
   if (!response.ok) {
     console.error("OPENAI API ERROR:", data);
+
     throw new Error(
       data?.error?.message || "OpenAI API request failed"
     );
   }
 
-  // Raw Responses API parser
   const answer =
     data?.output
       ?.filter(item => item.type === "message")
@@ -134,6 +140,7 @@ async function askOpenAI(prompt) {
 app.post("/ask", async (req, res) => {
   try {
     const prompt = req.body?.prompt;
+
     const provider = (
       req.body?.provider || "auto"
     ).toLowerCase();
@@ -146,7 +153,7 @@ app.post("/ask", async (req, res) => {
     }
 
     // =====================
-    // MANUAL OPENAI
+    // OPENAI
     // =====================
 
     if (
@@ -163,7 +170,7 @@ app.post("/ask", async (req, res) => {
     }
 
     // =====================
-    // MANUAL GEMINI
+    // GEMINI
     // =====================
 
     if (provider === "gemini") {
