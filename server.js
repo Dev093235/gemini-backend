@@ -13,7 +13,8 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     service: "Rudra AI Backend",
-    providers: ["gemini", "openai"],
+    providers: ["gemini", "openai", "deepseek"],
+    fallback: "gemini -> openai -> deepseek",
     status: "online"
   });
 });
@@ -48,13 +49,11 @@ async function askGemini(prompt) {
 
   if (!response.ok) {
     console.error("GEMINI API ERROR:", data);
-
     throw new Error(
       data?.error?.message || "Gemini API request failed"
     );
   }
 
-  // Current Gemini Interactions API response
   const answer =
     data?.steps
       ?.filter(step => step.type === "model_output")
@@ -106,7 +105,6 @@ async function askOpenAI(prompt) {
 
   if (!response.ok) {
     console.error("OPENAI API ERROR:", data);
-
     throw new Error(
       data?.error?.message || "OpenAI API request failed"
     );
@@ -134,6 +132,62 @@ async function askOpenAI(prompt) {
 }
 
 // =========================
+// DEEPSEEK
+// =========================
+
+async function askDeepSeek(prompt) {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("DEEPSEEK_API_KEY missing");
+  }
+
+  const response = await fetch(
+    "https://api.deepseek.com/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        messages: [
+          {
+            role: "user",
+            content: prompt
+          }
+        ]
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("DEEPSEEK API ERROR:", data);
+    throw new Error(
+      data?.error?.message || "DeepSeek API request failed"
+    );
+  }
+
+  const answer =
+    data?.choices?.[0]?.message?.content
+      ?.trim() || "";
+
+  if (!answer) {
+    console.error(
+      "DEEPSEEK RAW RESPONSE:",
+      JSON.stringify(data)
+    );
+
+    throw new Error("DeepSeek returned empty response");
+  }
+
+  return answer;
+}
+
+// =========================
 // ASK
 // =========================
 
@@ -153,7 +207,21 @@ app.post("/ask", async (req, res) => {
     }
 
     // =====================
-    // OPENAI
+    // MANUAL GEMINI
+    // =====================
+
+    if (provider === "gemini") {
+      const answer = await askGemini(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "gemini"
+      });
+    }
+
+    // =====================
+    // MANUAL OPENAI
     // =====================
 
     if (
@@ -170,23 +238,22 @@ app.post("/ask", async (req, res) => {
     }
 
     // =====================
-    // GEMINI
+    // MANUAL DEEPSEEK
     // =====================
 
-    if (provider === "gemini") {
-      const answer = await askGemini(prompt);
+    if (provider === "deepseek") {
+      const answer = await askDeepSeek(prompt);
 
       return res.json({
         success: true,
         answer,
-        provider: "gemini"
+        provider: "deepseek"
       });
     }
 
     // =====================
-    // AUTO
-    // Gemini first
-    // OpenAI fallback
+    // AUTO FALLBACK
+    // Gemini -> OpenAI -> DeepSeek
     // =====================
 
     try {
@@ -201,7 +268,7 @@ app.post("/ask", async (req, res) => {
     } catch (geminiError) {
 
       console.error(
-        "Gemini failed, trying OpenAI:",
+        "Gemini failed:",
         geminiError.message
       );
 
@@ -221,14 +288,32 @@ app.post("/ask", async (req, res) => {
           openaiError.message
         );
 
-        return res.status(500).json({
-          success: false,
-          error: "Both AI providers failed",
-          details: {
-            gemini: geminiError.message,
-            openai: openaiError.message
-          }
-        });
+        try {
+          const answer = await askDeepSeek(prompt);
+
+          return res.json({
+            success: true,
+            answer,
+            provider: "deepseek"
+          });
+
+        } catch (deepseekError) {
+
+          console.error(
+            "DeepSeek failed:",
+            deepseekError.message
+          );
+
+          return res.status(500).json({
+            success: false,
+            error: "All AI providers failed",
+            details: {
+              gemini: geminiError.message,
+              openai: openaiError.message,
+              deepseek: deepseekError.message
+            }
+          });
+        }
       }
     }
 
