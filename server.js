@@ -4,7 +4,9 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
-const REQUEST_TIMEOUT = 15000;
+
+// Maximum wait per provider
+const REQUEST_TIMEOUT = 12000;
 
 // =========================
 // HOME
@@ -15,11 +17,44 @@ app.get("/", (req, res) => {
     success: true,
     service: "Rudra AI Backend",
     providers: ["gemini", "openai", "groq"],
-    mode: "parallel-fastest-response",
-    fallback: "parallel-race",
+    mode: "sequential-fallback",
+    fallback: "gemini -> openai -> groq",
     status: "online"
   });
 });
+
+// =========================
+// TIMEOUT WRAPPER
+// =========================
+
+async function callWithTimeout(
+  provider,
+  fn,
+  prompt
+) {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT);
+
+  try {
+    return await fn(prompt, controller.signal);
+
+  } catch (error) {
+
+    if (error.name === "AbortError") {
+      throw new Error(
+        `${provider} timed out after ${REQUEST_TIMEOUT / 1000}s`
+      );
+    }
+
+    throw error;
+
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // =========================
 // GEMINI
@@ -52,7 +87,8 @@ async function askGemini(prompt, signal) {
 
   if (!response.ok) {
     throw new Error(
-      data?.error?.message || "Gemini API request failed"
+      data?.error?.message ||
+      "Gemini API request failed"
     );
   }
 
@@ -66,7 +102,9 @@ async function askGemini(prompt, signal) {
       ?.trim() || "";
 
   if (!answer) {
-    throw new Error("Gemini returned empty response");
+    throw new Error(
+      "Gemini returned empty response"
+    );
   }
 
   return answer;
@@ -103,7 +141,8 @@ async function askOpenAI(prompt, signal) {
 
   if (!response.ok) {
     throw new Error(
-      data?.error?.message || "OpenAI API request failed"
+      data?.error?.message ||
+      "OpenAI API request failed"
     );
   }
 
@@ -117,7 +156,9 @@ async function askOpenAI(prompt, signal) {
       ?.trim() || "";
 
   if (!answer) {
-    throw new Error("OpenAI returned empty response");
+    throw new Error(
+      "OpenAI returned empty response"
+    );
   }
 
   return answer;
@@ -159,7 +200,8 @@ async function askGroq(prompt, signal) {
 
   if (!response.ok) {
     throw new Error(
-      data?.error?.message || "Groq API request failed"
+      data?.error?.message ||
+      "Groq API request failed"
     );
   }
 
@@ -168,7 +210,9 @@ async function askGroq(prompt, signal) {
       ?.trim() || "";
 
   if (!answer) {
-    throw new Error("Groq returned empty response");
+    throw new Error(
+      "Groq returned empty response"
+    );
   }
 
   return answer;
@@ -185,110 +229,55 @@ const PROVIDERS = {
 };
 
 // =========================
-// SAFE ABORT
+// SEQUENTIAL FALLBACK
 // =========================
 
-function safeAbort(controller) {
-  try {
-    if (!controller.signal.aborted) {
-      controller.abort();
-    }
-  } catch (error) {
-    console.error("Abort error:", error.message);
-  }
-}
-
-// =========================
-// TIMEOUT WRAPPER
-// =========================
-
-function withTimeout(provider, task, controller) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      safeAbort(controller);
-      reject(
-        new Error(`${provider} request timed out`)
-      );
-    }, REQUEST_TIMEOUT);
-
-    task
-      .then(result => {
-        clearTimeout(timer);
-        resolve(result);
-      })
-      .catch(error => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
-
-// =========================
-// PARALLEL FASTEST RESPONSE
-// =========================
-
-async function askFastest(prompt) {
-  const controllers = {
-    gemini: new AbortController(),
-    openai: new AbortController(),
-    groq: new AbortController()
-  };
+async function askSequential(prompt) {
 
   const errors = {};
 
-  const tasks = Object.entries(PROVIDERS).map(
-    ([name, fn]) => {
+  for (const [provider, fn] of Object.entries(PROVIDERS)) {
 
-      const task = withTimeout(
-        name,
-        fn(
-          prompt,
-          controllers[name].signal
-        ),
-        controllers[name]
+    try {
+
+      console.log(
+        `[RUDRA] Trying ${provider}...`
       );
 
-      return task
-        .then(answer => ({
-          answer,
-          provider: name
-        }))
-        .catch(error => {
+      const answer = await callWithTimeout(
+        provider,
+        fn,
+        prompt
+      );
 
-          errors[name] =
-            error?.name === "AbortError"
-              ? `${name} request cancelled`
-              : error.message;
+      console.log(
+        `[RUDRA] Success: ${provider}`
+      );
 
-          throw error;
-        });
+      return {
+        answer,
+        provider
+      };
+
+    } catch (error) {
+
+      errors[provider] = error.message;
+
+      console.error(
+        `[RUDRA] ${provider} failed:`,
+        error.message
+      );
+
+      // Next provider only after failure
     }
-  );
-
-  try {
-
-    const winner = await Promise.any(tasks);
-
-    // Cancel remaining requests
-    Object.values(controllers).forEach(
-      safeAbort
-    );
-
-    return winner;
-
-  } catch (error) {
-
-    Object.values(controllers).forEach(
-      safeAbort
-    );
-
-    throw new Error(
-      JSON.stringify({
-        message: "All AI providers failed",
-        details: errors
-      })
-    );
   }
+
+  throw new Error(
+    JSON.stringify({
+      message: "All AI providers failed",
+      details: errors
+    })
+  );
 }
 
 // =========================
@@ -322,6 +311,7 @@ app.post("/ask", async (req, res) => {
       typeof prompt !== "string" ||
       !prompt.trim()
     ) {
+
       return sendOnce(400, {
         success: false,
         error: "prompt required"
@@ -353,18 +343,12 @@ app.post("/ask", async (req, res) => {
         });
       }
 
-      const controller =
-        new AbortController();
-
       try {
 
-        const answer = await withTimeout(
+        const answer = await callWithTimeout(
           selectedProvider,
-          PROVIDERS[selectedProvider](
-            prompt,
-            controller.signal
-          ),
-          controller
+          PROVIDERS[selectedProvider],
+          prompt
         );
 
         return sendOnce(200, {
@@ -376,8 +360,6 @@ app.post("/ask", async (req, res) => {
 
       } catch (error) {
 
-        safeAbort(controller);
-
         return sendOnce(500, {
           success: false,
           error: error.message,
@@ -387,21 +369,24 @@ app.post("/ask", async (req, res) => {
     }
 
     // =====================
-    // AUTO: PARALLEL RACE
+    // AUTO FALLBACK
     // =====================
 
-    const result = await askFastest(prompt);
+    const result = await askSequential(prompt);
 
     return sendOnce(200, {
       success: true,
       answer: result.answer,
       provider: result.provider,
-      mode: "parallel-fastest"
+      mode: "sequential-fallback"
     });
 
   } catch (error) {
 
-    console.error("SERVER ERROR:", error);
+    console.error(
+      "[RUDRA] SERVER ERROR:",
+      error
+    );
 
     return sendOnce(500, {
       success: false,
@@ -422,7 +407,11 @@ app.listen(PORT, () => {
   );
 
   console.log(
-    "Mode: PARALLEL FASTEST RESPONSE"
+    "Mode: SEQUENTIAL FALLBACK"
+  );
+
+  console.log(
+    "Gemini -> OpenAI -> Groq"
   );
 
 });
