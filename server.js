@@ -1,6 +1,7 @@
 const express = require("express");
 
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -13,8 +14,13 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     service: "Rudra AI Backend",
-    providers: ["gemini", "openai", "groq"],
-    fallback: "gemini -> openai -> groq",
+    providers: [
+      "gemini",
+      "openai",
+      "groq",
+      "deepseek"
+    ],
+    fallback: "gemini -> openai -> groq -> deepseek",
     status: "online"
   });
 });
@@ -191,6 +197,64 @@ async function askGroq(prompt) {
 }
 
 // =========================
+// DEEPSEEK
+// =========================
+
+async function askDeepSeek(prompt) {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("DEEPSEEK_API_KEY missing");
+  }
+
+  const response = await fetch(
+    "https://api.deepseek.com/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        messages: [
+          {
+            role: "user",
+            content: prompt
+          }
+        ],
+        stream: false
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("DEEPSEEK API ERROR:", data);
+
+    throw new Error(
+      data?.error?.message || "DeepSeek API request failed"
+    );
+  }
+
+  const answer =
+    data?.choices?.[0]?.message?.content
+      ?.trim() || "";
+
+  if (!answer) {
+    console.error(
+      "DEEPSEEK RAW RESPONSE:",
+      JSON.stringify(data)
+    );
+
+    throw new Error("DeepSeek returned empty response");
+  }
+
+  return answer;
+}
+
+// =========================
 // ASK
 // =========================
 
@@ -219,7 +283,8 @@ app.post("/ask", async (req, res) => {
       return res.json({
         success: true,
         answer,
-        provider: "gemini"
+        provider: "gemini",
+        mode: "manual"
       });
     }
 
@@ -236,7 +301,8 @@ app.post("/ask", async (req, res) => {
       return res.json({
         success: true,
         answer,
-        provider: "openai"
+        provider: "openai",
+        mode: "manual"
       });
     }
 
@@ -250,14 +316,39 @@ app.post("/ask", async (req, res) => {
       return res.json({
         success: true,
         answer,
-        provider: "groq"
+        provider: "groq",
+        mode: "manual"
+      });
+    }
+
+    // =====================
+    // MANUAL DEEPSEEK
+    // =====================
+
+    if (provider === "deepseek") {
+      const answer = await askDeepSeek(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "deepseek",
+        mode: "manual"
       });
     }
 
     // =====================
     // AUTO FALLBACK
     //
-    // Gemini -> OpenAI -> Groq
+    // Gemini -> OpenAI -> Groq -> DeepSeek
+    // =====================
+
+    let geminiError;
+    let openaiError;
+    let groqError;
+    let deepseekError;
+
+    // =====================
+    // TRY GEMINI
     // =====================
 
     try {
@@ -266,63 +357,104 @@ app.post("/ask", async (req, res) => {
       return res.json({
         success: true,
         answer,
-        provider: "gemini"
+        provider: "gemini",
+        mode: "auto"
       });
 
-    } catch (geminiError) {
+    } catch (error) {
+      geminiError = error;
 
       console.error(
         "Gemini failed:",
-        geminiError.message
+        error.message
       );
-
-      try {
-        const answer = await askOpenAI(prompt);
-
-        return res.json({
-          success: true,
-          answer,
-          provider: "openai"
-        });
-
-      } catch (openaiError) {
-
-        console.error(
-          "OpenAI failed:",
-          openaiError.message
-        );
-
-        try {
-          const answer = await askGroq(prompt);
-
-          return res.json({
-            success: true,
-            answer,
-            provider: "groq"
-          });
-
-        } catch (groqError) {
-
-          console.error(
-            "Groq failed:",
-            groqError.message
-          );
-
-          return res.status(500).json({
-            success: false,
-            error: "All AI providers failed",
-            details: {
-              gemini: geminiError.message,
-              openai: openaiError.message,
-              groq: groqError.message
-            }
-          });
-        }
-      }
     }
 
-  } catch (error) {
+    // =====================
+    // TRY OPENAI
+    // =====================
 
+    try {
+      const answer = await askOpenAI(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "openai",
+        mode: "auto"
+      });
+
+    } catch (error) {
+      openaiError = error;
+
+      console.error(
+        "OpenAI failed:",
+        error.message
+      );
+    }
+
+    // =====================
+    // TRY GROQ
+    // =====================
+
+    try {
+      const answer = await askGroq(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "groq",
+        mode: "auto"
+      });
+
+    } catch (error) {
+      groqError = error;
+
+      console.error(
+        "Groq failed:",
+        error.message
+      );
+    }
+
+    // =====================
+    // TRY DEEPSEEK
+    // =====================
+
+    try {
+      const answer = await askDeepSeek(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "deepseek",
+        mode: "auto"
+      });
+
+    } catch (error) {
+      deepseekError = error;
+
+      console.error(
+        "DeepSeek failed:",
+        error.message
+      );
+    }
+
+    // =====================
+    // ALL PROVIDERS FAILED
+    // =====================
+
+    return res.status(500).json({
+      success: false,
+      error: "All AI providers failed",
+      details: {
+        gemini: geminiError?.message || "Unknown error",
+        openai: openaiError?.message || "Unknown error",
+        groq: groqError?.message || "Unknown error",
+        deepseek: deepseekError?.message || "Unknown error"
+      }
+    });
+
+  } catch (error) {
     console.error("SERVER ERROR:", error);
 
     return res.status(500).json({
