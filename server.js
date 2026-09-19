@@ -1,9 +1,10 @@
 const express = require("express");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
+const REQUEST_TIMEOUT = 15000;
 
 // =========================
 // HOME
@@ -14,7 +15,8 @@ app.get("/", (req, res) => {
     success: true,
     service: "Rudra AI Backend",
     providers: ["gemini", "openai", "groq"],
-    fallback: "gemini -> openai -> groq",
+    mode: "parallel-fastest-response",
+    fallback: "parallel-race",
     status: "online"
   });
 });
@@ -23,7 +25,7 @@ app.get("/", (req, res) => {
 // GEMINI
 // =========================
 
-async function askGemini(prompt) {
+async function askGemini(prompt, signal) {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -41,15 +43,14 @@ async function askGemini(prompt) {
       body: JSON.stringify({
         model: "gemini-3.6-flash",
         input: prompt
-      })
+      }),
+      signal
     }
   );
 
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("GEMINI API ERROR:", data);
-
     throw new Error(
       data?.error?.message || "Gemini API request failed"
     );
@@ -65,11 +66,6 @@ async function askGemini(prompt) {
       ?.trim() || "";
 
   if (!answer) {
-    console.error(
-      "GEMINI RAW RESPONSE:",
-      JSON.stringify(data)
-    );
-
     throw new Error("Gemini returned empty response");
   }
 
@@ -80,7 +76,7 @@ async function askGemini(prompt) {
 // OPENAI
 // =========================
 
-async function askOpenAI(prompt) {
+async function askOpenAI(prompt, signal) {
   const apiKey = process.env.OPENAI_API_KEY;
 
   if (!apiKey) {
@@ -98,15 +94,14 @@ async function askOpenAI(prompt) {
       body: JSON.stringify({
         model: "gpt-5.6-luna",
         input: prompt
-      })
+      }),
+      signal
     }
   );
 
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("OPENAI API ERROR:", data);
-
     throw new Error(
       data?.error?.message || "OpenAI API request failed"
     );
@@ -122,11 +117,6 @@ async function askOpenAI(prompt) {
       ?.trim() || "";
 
   if (!answer) {
-    console.error(
-      "OPENAI RAW RESPONSE:",
-      JSON.stringify(data)
-    );
-
     throw new Error("OpenAI returned empty response");
   }
 
@@ -137,7 +127,7 @@ async function askOpenAI(prompt) {
 // GROQ
 // =========================
 
-async function askGroq(prompt) {
+async function askGroq(prompt, signal) {
   const apiKey = process.env.GROQ_API_KEY;
 
   if (!apiKey) {
@@ -160,15 +150,14 @@ async function askGroq(prompt) {
             content: prompt
           }
         ]
-      })
+      }),
+      signal
     }
   );
 
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("GROQ API ERROR:", data);
-
     throw new Error(
       data?.error?.message || "Groq API request failed"
     );
@@ -179,11 +168,6 @@ async function askGroq(prompt) {
       ?.trim() || "";
 
   if (!answer) {
-    console.error(
-      "GROQ RAW RESPONSE:",
-      JSON.stringify(data)
-    );
-
     throw new Error("Groq returned empty response");
   }
 
@@ -191,143 +175,238 @@ async function askGroq(prompt) {
 }
 
 // =========================
-// ASK
+// PROVIDERS
+// =========================
+
+const PROVIDERS = {
+  gemini: askGemini,
+  openai: askOpenAI,
+  groq: askGroq
+};
+
+// =========================
+// SAFE ABORT
+// =========================
+
+function safeAbort(controller) {
+  try {
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  } catch (error) {
+    console.error("Abort error:", error.message);
+  }
+}
+
+// =========================
+// TIMEOUT WRAPPER
+// =========================
+
+function withTimeout(provider, task, controller) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      safeAbort(controller);
+      reject(
+        new Error(`${provider} request timed out`)
+      );
+    }, REQUEST_TIMEOUT);
+
+    task
+      .then(result => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch(error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+// =========================
+// PARALLEL FASTEST RESPONSE
+// =========================
+
+async function askFastest(prompt) {
+  const controllers = {
+    gemini: new AbortController(),
+    openai: new AbortController(),
+    groq: new AbortController()
+  };
+
+  const errors = {};
+
+  const tasks = Object.entries(PROVIDERS).map(
+    ([name, fn]) => {
+
+      const task = withTimeout(
+        name,
+        fn(
+          prompt,
+          controllers[name].signal
+        ),
+        controllers[name]
+      );
+
+      return task
+        .then(answer => ({
+          answer,
+          provider: name
+        }))
+        .catch(error => {
+
+          errors[name] =
+            error?.name === "AbortError"
+              ? `${name} request cancelled`
+              : error.message;
+
+          throw error;
+        });
+    }
+  );
+
+  try {
+
+    const winner = await Promise.any(tasks);
+
+    // Cancel remaining requests
+    Object.values(controllers).forEach(
+      safeAbort
+    );
+
+    return winner;
+
+  } catch (error) {
+
+    Object.values(controllers).forEach(
+      safeAbort
+    );
+
+    throw new Error(
+      JSON.stringify({
+        message: "All AI providers failed",
+        details: errors
+      })
+    );
+  }
+}
+
+// =========================
+// ASK ROUTE
 // =========================
 
 app.post("/ask", async (req, res) => {
+
+  let responded = false;
+
+  const sendOnce = (status, data) => {
+
+    if (responded || res.headersSent) {
+      return;
+    }
+
+    responded = true;
+
+    return res.status(status).json(data);
+  };
+
   try {
+
     const prompt = req.body?.prompt;
 
-    const provider = (
+    const provider = String(
       req.body?.provider || "auto"
     ).toLowerCase();
 
-    if (!prompt) {
-      return res.status(400).json({
+    if (
+      typeof prompt !== "string" ||
+      !prompt.trim()
+    ) {
+      return sendOnce(400, {
         success: false,
         error: "prompt required"
       });
     }
 
     // =====================
-    // MANUAL GEMINI
+    // MANUAL PROVIDER
     // =====================
 
-    if (provider === "gemini") {
-      const answer = await askGemini(prompt);
+    if (provider !== "auto") {
 
-      return res.json({
-        success: true,
-        answer,
-        provider: "gemini"
-      });
-    }
+      const selectedProvider =
+        provider === "chatgpt"
+          ? "openai"
+          : provider;
 
-    // =====================
-    // MANUAL OPENAI
-    // =====================
+      if (!PROVIDERS[selectedProvider]) {
 
-    if (
-      provider === "openai" ||
-      provider === "chatgpt"
-    ) {
-      const answer = await askOpenAI(prompt);
+        return sendOnce(400, {
+          success: false,
+          error: "Invalid provider",
+          available: [
+            "auto",
+            "gemini",
+            "openai",
+            "groq"
+          ]
+        });
+      }
 
-      return res.json({
-        success: true,
-        answer,
-        provider: "openai"
-      });
-    }
-
-    // =====================
-    // MANUAL GROQ
-    // =====================
-
-    if (provider === "groq") {
-      const answer = await askGroq(prompt);
-
-      return res.json({
-        success: true,
-        answer,
-        provider: "groq"
-      });
-    }
-
-    // =====================
-    // AUTO FALLBACK
-    //
-    // Gemini -> OpenAI -> Groq
-    // =====================
-
-    try {
-      const answer = await askGemini(prompt);
-
-      return res.json({
-        success: true,
-        answer,
-        provider: "gemini"
-      });
-
-    } catch (geminiError) {
-
-      console.error(
-        "Gemini failed:",
-        geminiError.message
-      );
+      const controller =
+        new AbortController();
 
       try {
-        const answer = await askOpenAI(prompt);
 
-        return res.json({
-          success: true,
-          answer,
-          provider: "openai"
-        });
-
-      } catch (openaiError) {
-
-        console.error(
-          "OpenAI failed:",
-          openaiError.message
+        const answer = await withTimeout(
+          selectedProvider,
+          PROVIDERS[selectedProvider](
+            prompt,
+            controller.signal
+          ),
+          controller
         );
 
-        try {
-          const answer = await askGroq(prompt);
+        return sendOnce(200, {
+          success: true,
+          answer,
+          provider: selectedProvider,
+          mode: "manual"
+        });
 
-          return res.json({
-            success: true,
-            answer,
-            provider: "groq"
-          });
+      } catch (error) {
 
-        } catch (groqError) {
+        safeAbort(controller);
 
-          console.error(
-            "Groq failed:",
-            groqError.message
-          );
-
-          return res.status(500).json({
-            success: false,
-            error: "All AI providers failed",
-            details: {
-              gemini: geminiError.message,
-              openai: openaiError.message,
-              groq: groqError.message
-            }
-          });
-        }
+        return sendOnce(500, {
+          success: false,
+          error: error.message,
+          provider: selectedProvider
+        });
       }
     }
+
+    // =====================
+    // AUTO: PARALLEL RACE
+    // =====================
+
+    const result = await askFastest(prompt);
+
+    return sendOnce(200, {
+      success: true,
+      answer: result.answer,
+      provider: result.provider,
+      mode: "parallel-fastest"
+    });
 
   } catch (error) {
 
     console.error("SERVER ERROR:", error);
 
-    return res.status(500).json({
+    return sendOnce(500, {
       success: false,
-      error: error.message || "Server error"
+      error: "All AI providers failed",
+      details: error.message
     });
   }
 });
@@ -337,7 +416,13 @@ app.post("/ask", async (req, res) => {
 // =========================
 
 app.listen(PORT, () => {
+
   console.log(
     `Rudra AI Backend running on port ${PORT}`
   );
+
+  console.log(
+    "Mode: PARALLEL FASTEST RESPONSE"
+  );
+
 });
