@@ -1,7 +1,6 @@
 const express = require("express");
 
 const app = express();
-
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -14,14 +13,128 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     service: "Rudra AI Backend",
-    providers: ["groq"],
-    mode: "groq only",
+    providers: ["gemini", "openai", "groq"],
+    fallback: "gemini -> openai -> groq",
     status: "online"
   });
 });
 
 // =========================
-// GROQ AI
+// GEMINI
+// =========================
+
+async function askGemini(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY missing");
+  }
+
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey
+      },
+      body: JSON.stringify({
+        model: "gemini-3.6-flash",
+        input: prompt
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("GEMINI API ERROR:", data);
+
+    throw new Error(
+      data?.error?.message || "Gemini API request failed"
+    );
+  }
+
+  const answer =
+    data?.steps
+      ?.filter(step => step.type === "model_output")
+      ?.flatMap(step => step.content || [])
+      ?.filter(item => item.type === "text")
+      ?.map(item => item.text)
+      ?.join("\n")
+      ?.trim() || "";
+
+  if (!answer) {
+    console.error(
+      "GEMINI RAW RESPONSE:",
+      JSON.stringify(data)
+    );
+
+    throw new Error("Gemini returned empty response");
+  }
+
+  return answer;
+}
+
+// =========================
+// OPENAI
+// =========================
+
+async function askOpenAI(prompt) {
+  const apiKey = process.env.OPENAI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY missing");
+  }
+
+  const response = await fetch(
+    "https://api.openai.com/v1/responses",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        input: prompt
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("OPENAI API ERROR:", data);
+
+    throw new Error(
+      data?.error?.message || "OpenAI API request failed"
+    );
+  }
+
+  const answer =
+    data?.output
+      ?.filter(item => item.type === "message")
+      ?.flatMap(item => item.content || [])
+      ?.filter(item => item.type === "output_text")
+      ?.map(item => item.text)
+      ?.join("\n")
+      ?.trim() || "";
+
+  if (!answer) {
+    console.error(
+      "OPENAI RAW RESPONSE:",
+      JSON.stringify(data)
+    );
+
+    throw new Error("OpenAI returned empty response");
+  }
+
+  return answer;
+}
+
+// =========================
+// GROQ
 // =========================
 
 async function askGroq(prompt) {
@@ -35,24 +148,18 @@ async function askGroq(prompt) {
     "https://api.groq.com/openai/v1/chat/completions",
     {
       method: "POST",
-
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`
       },
-
       body: JSON.stringify({
         model: "openai/gpt-oss-120b",
-
         messages: [
           {
             role: "user",
             content: prompt
           }
-        ],
-
-        temperature: 0.7,
-        stream: false
+        ]
       })
     }
   );
@@ -91,6 +198,10 @@ app.post("/ask", async (req, res) => {
   try {
     const prompt = req.body?.prompt;
 
+    const provider = (
+      req.body?.provider || "auto"
+    ).toLowerCase();
+
     if (!prompt) {
       return res.status(400).json({
         success: false,
@@ -98,38 +209,127 @@ app.post("/ask", async (req, res) => {
       });
     }
 
-    console.log("Incoming request received");
-    console.log("Provider: Groq");
+    // =====================
+    // MANUAL GEMINI
+    // =====================
 
-    const answer = await askGroq(prompt);
+    if (provider === "gemini") {
+      const answer = await askGemini(prompt);
 
-    return res.json({
-      success: true,
-      answer,
-      provider: "groq",
-      mode: "groq-only"
-    });
+      return res.json({
+        success: true,
+        answer,
+        provider: "gemini"
+      });
+    }
+
+    // =====================
+    // MANUAL OPENAI
+    // =====================
+
+    if (
+      provider === "openai" ||
+      provider === "chatgpt"
+    ) {
+      const answer = await askOpenAI(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "openai"
+      });
+    }
+
+    // =====================
+    // MANUAL GROQ
+    // =====================
+
+    if (provider === "groq") {
+      const answer = await askGroq(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "groq"
+      });
+    }
+
+    // =====================
+    // AUTO FALLBACK
+    //
+    // Gemini -> OpenAI -> Groq
+    // =====================
+
+    try {
+      const answer = await askGemini(prompt);
+
+      return res.json({
+        success: true,
+        answer,
+        provider: "gemini"
+      });
+
+    } catch (geminiError) {
+
+      console.error(
+        "Gemini failed:",
+        geminiError.message
+      );
+
+      try {
+        const answer = await askOpenAI(prompt);
+
+        return res.json({
+          success: true,
+          answer,
+          provider: "openai"
+        });
+
+      } catch (openaiError) {
+
+        console.error(
+          "OpenAI failed:",
+          openaiError.message
+        );
+
+        try {
+          const answer = await askGroq(prompt);
+
+          return res.json({
+            success: true,
+            answer,
+            provider: "groq"
+          });
+
+        } catch (groqError) {
+
+          console.error(
+            "Groq failed:",
+            groqError.message
+          );
+
+          return res.status(500).json({
+            success: false,
+            error: "All AI providers failed",
+            details: {
+              gemini: geminiError.message,
+              openai: openaiError.message,
+              groq: groqError.message
+            }
+          });
+        }
+      }
+    }
 
   } catch (error) {
-    console.error("GROQ SERVER ERROR:", error);
+
+    console.error("SERVER ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      error: error.message || "Groq request failed",
-      provider: "groq"
+      error: error.message || "Server error"
     });
   }
-});
-
-// =========================
-// 404 HANDLER
-// =========================
-
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: "Route not found"
-  });
 });
 
 // =========================
@@ -140,6 +340,4 @@ app.listen(PORT, () => {
   console.log(
     `Rudra AI Backend running on port ${PORT}`
   );
-
-  console.log("Active provider: GROQ ONLY");
 });
